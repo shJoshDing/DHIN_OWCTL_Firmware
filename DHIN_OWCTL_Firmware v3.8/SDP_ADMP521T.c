@@ -1,0 +1,679 @@
+//SDP_ADMP521T.c
+
+#include "SDP_std_include.h"
+#include "SDP_gpio_i2c.h"
+#include "SDP_pdm.h"
+#include "SDP_ADMP521T.h"
+#include "SDP_my_TWI.h"
+#include "SDP_twi_low_level.h"
+#include <stdio.h>
+#include <string.h>
+
+//Params & functions definition ---------------------------------------------------------------
+#define FW_version 0x22
+#define LOW	 false
+#define HIGH true
+
+REGMAP admp521TReg;
+u8 sendBuf[512];
+bool LR_sel_last	=  false;
+bool IfPostTrim		=  false;
+
+u8 reg_F2_old = 0x00;
+u8 reg_F2_mask = 0xA5;
+u8 reg_F2_ClearTrimLoad = 0xA1;
+
+void SportPDMStart(SDP_USB_HEADER *pUsbHeader);
+void SportPDMStop(void);
+void GPIO_I2C_Read(SDP_USB_HEADER *pUsbHeader);
+void Mode_Normal(SDP_USB_HEADER *pUsbHeader);
+void Mode_Test(SDP_USB_HEADER *pUsbHeader);
+void Mode_NormalTest(SDP_USB_HEADER *pUsbHeader);
+void Mode_Fuse(SDP_USB_HEADER *pUsbHeader);
+void Get_FW_Version(void);
+void TestFunc(SDP_USB_HEADER *pUsbHeader);
+void OtherControl(SDP_USB_HEADER *pUsbHeader);
+void PrepareI2CWrite(void);
+void Setting_Normal(bool SDPorAP);
+void Setting_Test(bool write);
+void Setting_Fuse(void);
+void Setting_NormalTest(bool SDPorAP);
+
+
+
+//void SetLR(bool high);
+
+u8 test[2];
+
+//---------------------------------------------------------------------------------------------
+void Initi_ADMP521T(void)
+{
+	
+}
+
+
+void process521TCmd(SDP_USB_HEADER *pUsbHeader)
+{
+	switch(pUsbHeader->cmd)
+	{		
+		case ADI_SDP_CMD_ADMP521T_SportPDM_Start:
+			SportPDMStart(pUsbHeader);
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_SportPDM_Stop:
+			SportPDMStop();
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_GPIO_I2C_Read:
+			GPIO_I2C_Read(pUsbHeader);
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_Mode_Normal:
+			Mode_Normal(pUsbHeader);
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_Mode_Test:
+			Mode_Test(pUsbHeader);
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_Mode_NormalTest:
+			Mode_NormalTest(pUsbHeader);
+			break;
+		
+		case ADI_SDP_CMD_ADMP521T_Mode_Fuse:
+			Mode_Fuse(pUsbHeader);
+			break;
+			
+		case ADI_SDP_CMD_ADMP521T_FW_Version:
+			Get_FW_Version();
+			break;
+			
+		case ADI_SDP_CMD_ADMP521T_SETLR:
+			SetLR((bool)(pUsbHeader->downByteCount), pUsbHeader->upByteCount,(bool)(pUsbHeader->numParam));
+			break;
+			
+		case ADI_SDP_CMD_ADMP521T_OtherCtrl:
+			OtherControl(pUsbHeader);
+			break;
+			
+		case ADI_SDP_CMD_ADMP521T_TEST:
+			//TestFunc(pUsbHeader);
+			InitADMP441((bool)(pUsbHeader->downByteCount));
+			//ADMP521T_CLK_OE((bool)(pUsbHeader->downByteCount));
+			break;
+	}
+}
+
+
+void SportPDMStart(SDP_USB_HEADER *pUsbHeader)
+{
+	//ADMP521T_CLK_OE(LOW);
+	PDMEntry();
+	//flashLed();
+	if(!(bool)(pUsbHeader->downByteCount))	//true:clk already on. false: clk is off. should send clk.
+		ADMP521T_CLK_OE(LOW);
+}
+
+void SportPDMStop(void)
+{
+	ADMP521T_CLK_OE(HIGH);
+	PDMClose();
+}
+
+void GPIO_I2C_Read(SDP_USB_HEADER *pUsbHeader)
+{
+	//Read registers
+	//set hard ware pins
+	//SetLR(LOW, 2,false);
+	ADMP521T_CLK_OE(LOW);
+	ADMP521T_FUSE_OE(HIGH);				//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);			//first set high, in order to do prepare operation.
+	SetPin_H(CLK_SEL_H, LOW);
+	SetPin_H(MUX_SEL_H, HIGH);
+
+	u8 readNum = (u8) pUsbHeader->downByteCount;
+	u8 chipAddr = (u8)pUsbHeader->upByteCount;
+	u8 dataBuffer[2 * readNum];
+	
+	u8 index;
+	for(index = 0; index < readNum; index++)
+	{
+		dataBuffer[2 * index] =(u8)(pUsbHeader->paramArray[2 * index]);
+		dataBuffer[2 * index + 1] =(u8)(pUsbHeader->paramArray[2 * index + 1]);
+	}
+	
+	//if(!(pUsbHeader->numParam))		//Test mode
+	if(!IfPostTrim)
+	{
+	
+		if(!I2CRead(chipAddr, dataBuffer, readNum, PORTF))
+		{
+			//flashLed();
+		}
+		else
+		{
+			memset(sendBuf, 0, sizeof(sendBuf));
+			for(index = 0; index < sizeof(dataBuffer); index++)
+			{
+				sendBuf[4 * index] = dataBuffer[index];
+			}
+			//flashLed();
+			//memcpy(sendBuf, dataBuffer,sizeof(dataBuffer));
+			usbSendBulkData( &sendBuf[0],
+				                 512,
+				                 false);
+		}
+		SetPin_H(DATA_DIR_H, LOW);	
+	}
+	else		//Post trim mode
+	{
+		if(!I2CRead(chipAddr, dataBuffer, readNum, PORTFH))
+		{
+			//flashLed();
+		}
+		else
+		{
+			memset(sendBuf, 0, sizeof(sendBuf));
+			for(index = 0; index < sizeof(dataBuffer); index++)
+			{
+				sendBuf[4 * index] = dataBuffer[index];
+			}
+			//flashLed();
+			//memcpy(sendBuf, dataBuffer,sizeof(dataBuffer));
+			usbSendBulkData( &sendBuf[0],
+				                 512,
+				                 false);
+		}
+		SetPin_H(DATA_DIR_H, LOW);	
+	}
+}
+
+void Mode_Normal(SDP_USB_HEADER *pUsbHeader)
+{
+	//flashLed();
+	//set hard ware pins
+/*	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(HIGH);	
+	SetPin_H(DIR_H, HIGH);
+	//First set as high, in order to prepare operation. At the end should change to low
+	SetPin_H(DATA_DIR_H, HIGH);	
+	SetPin_H(CLK_SEL_H, HIGH);
+	SetPin_H(MUX_SEL_H, (bool)(pUsbHeader->numParam));
+	SetPin_H(SDP_LR0_H, LOW);
+	SetPin_G(SDP_LR1_G, HIGH);	
+*/	
+	//Do not send clk to chip(Can not set to Test_mode setting.Because clk_OE must set to High.)
+	ADMP521T_CLK_OE(HIGH);			//close clk oe
+	ADMP521T_FUSE_OE(LOW);			//open fuse oe. Because the two OE should open one for i2c operation.
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);		//default setting is write.	
+	SetPin_H(CLK_SEL_H, LOW);	
+	SetPin_H(MUX_SEL_H, HIGH);
+	SetLR(LOW, 2,false);	
+	
+	//Setting_Test(HIGH);
+	
+	if(pUsbHeader->downByteCount == 0)
+	{
+		//Set clk pin direction to in. In order to send clock while recording.
+		SetClkPinDir(true);	//Set clk in direction.
+	}		
+	else
+	{
+		//i2c write noraml en to enter normal mode.
+		u8 temp[2];
+		temp[0] = 0xF2;
+		temp[1] = reg_F2_old & reg_F2_mask;	//restore last reg f2 value, in order to read from hard ware(&->set all mode selected bit to 0)
+		temp[1] |= Norm_en;
+//		if(LR_sel_last)			//record last LR_sel setting.
+//			temp[1] |= LR_sel;		
+
+		if(!IfPostTrim)
+		{			
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF));
+			{
+				//flashLed();
+			}
+		}
+		else
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTFH));
+			{
+				//flashLed();
+			}
+		}
+
+		SetClkPinDir(true);	//Set clk in direction.
+	}
+	
+	Setting_Normal((bool)(pUsbHeader->numParam));
+}
+
+void Mode_Test(SDP_USB_HEADER *pUsbHeader)
+{
+	//set hard ware pins
+/*	SetLR(LOW, 2,false);
+	ADMP521T_CLK_OE(LOW);
+	ADMP521T_FUSE_OE(HIGH);		//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(CLK_SEL_H, LOW);
+	//SetPin_H(MUX_SEL_H, HIGH);
+	//SetPin_H(SDP_LR0_H, HIGH);
+	//SetPin_H(SDP_LR1_H, HIGH);
+	
+	SetPin_H(DATA_DIR_H, HIGH);		//default setting is write.
+*/
+
+	Setting_Test(HIGH);
+	//write 0x51 to 0xAA
+	if(pUsbHeader->downByteCount == 0)
+	{
+		//flashLed();
+		u8 temp[2];
+		temp[0] = 0xAA;
+		temp[1] = 0x51;
+		
+		if(!IfPostTrim)
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF));
+			{
+				//flashLed();
+			}
+		}
+		else
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTFH));
+			{
+				//flashLed();
+			}
+		}
+		
+/*
+		SetPin_H(DATA_DIR_H, HIGH);				
+		//set hard ware pins	
+		ADMP521T_CLK_OE(LOW);
+		ADMP521T_FUSE_OE(HIGH);		//Close Fuse chip enable pin
+		SetPin_H(DIR_H, HIGH);
+		SetPin_H(CLK_SEL_H, LOW);
+		//SetPin_H(MUX_SEL_H, HIGH);
+		//SetPin_H(SDP_LR0_H, HIGH);
+		//SetPin_H(SDP_LR1_H, HIGH);
+		SetLR(LOW, 2,false);
+*/
+	}
+	else
+	{		
+		u8 writeNum = (u8) pUsbHeader->downByteCount;
+		u8 chipAddr = ADMP521T_ChipAdd;
+		u8 dataBuffer[2 * writeNum];
+		
+		//copy i2c add and val for i2c writting.	
+		u8 index;
+		for(index = 0; index < writeNum; index++)
+		{
+			dataBuffer[2 * index] =(u8)(pUsbHeader->paramArray[2 * index]);
+			dataBuffer[2 * index + 1] =(u8)(pUsbHeader->paramArray[2 * index + 1]);
+			
+			if((dataBuffer[2 * index] == 0xF2))
+				//LR_sel_last = (bool)(dataBuffer[2 * index + 1] & LR_sel);
+				reg_F2_old = dataBuffer[2 * index + 1];
+		}
+	
+		//if(!(pUsbHeader->numParam))						//Test mode
+		if(!IfPostTrim)
+		{
+			if(!I2CWrite(chipAddr, dataBuffer, writeNum, PORTF))
+			{
+				//flashLed();
+			}
+			SetPin_H(DATA_DIR_H, HIGH);
+		}
+		else												//Post Trim mode
+		{
+			if(!I2CWrite(chipAddr, dataBuffer, writeNum, PORTFH))
+			{
+				//flashLed();
+			}
+			SetPin_H(DATA_DIR_H, LOW);
+		}
+	}
+}
+
+void Mode_NormalTest(SDP_USB_HEADER *pUsbHeader)
+{
+	//set hard ware pins
+/*	SetLR(LOW, 2,false);
+	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(LOW);	
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);
+	SetPin_H(CLK_SEL_H, LOW);
+	SetPin_H(MUX_SEL_H, (bool)(pUsbHeader->numParam));
+	//SetPin_H(SDP_LR0_H, HIGH);
+	//SetPin_H(SDP_LR1_H, HIGH);		
+	//SetClkPinDir(false);	//Set clk in direction.
+	//i2c write noraml test en to enter normal test mode.
+
+	//PrepareI2CWrite();	
+*/	
+	
+	//Do not send clk to chip(Can not set to Test_mode setting.Because clk_OE must set to High.)
+	ADMP521T_CLK_OE(HIGH);			//close clk oe
+	ADMP521T_FUSE_OE(LOW);			//open fuse oe. Because the two OE should open one for i2c operation.
+	SetPin_H(DIR_H, HIGH);	
+	SetPin_H(DATA_DIR_H, HIGH);		//default setting is write.	
+	SetPin_H(CLK_SEL_H, LOW);	
+	SetPin_H(MUX_SEL_H, HIGH);
+	SetLR(LOW, 2,false);		
+	
+	u8 temp[2];
+	temp[0] = 0xF2;
+	temp[1] = reg_F2_old & reg_F2_mask;	
+	temp[1] |= Norm_T;
+//	if(LR_sel_last)			//remember last LR_sel setting.	
+//		temp[1] |= LR_sel;
+	
+	if(!IfPostTrim)
+	{
+		if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF))
+		{
+			//flashLed();
+		}
+	}
+	else
+	{
+		if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTFH))
+		{
+			//flashLed();
+		}
+	}	
+	
+	SetClkPinDir(true);	//Set clk in direction.	
+	Setting_NormalTest((bool)(pUsbHeader->numParam));
+	//SetClkPinDir(true);		//Set clk in direction.	
+	//SetLR(HIGH, 2,false);
+}
+
+void Mode_Fuse(SDP_USB_HEADER *pUsbHeader)
+{
+	//set hard ware pins
+/*	SetLR(LOW, 2,false);
+	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(LOW);		//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);
+	SetPin_H(CLK_SEL_H, LOW);
+	//SetPin_H(MUX_SEL_H, HIGH);
+	//SetPin_H(SDP_LR0_H, HIGH);
+	//SetPin_H(SDP_LR1_H, HIGH);
+*/
+		
+	u8 temp[2];
+	u32 FUSE_CLK_CNT	=		 2;
+	if(pUsbHeader->downByteCount == 0)				//Select mode.
+	{		
+		temp[0] = 0xF2;
+		temp[1] = reg_F2_old & reg_F2_ClearTrimLoad;
+		temp[1] |= Fuse_en;
+//		if(LR_sel_last)			//record last LR_sel setting.
+//			temp[1] |= LR_sel;
+		
+		Setting_Test(HIGH);		//setting to i2c writting condition before i2c operation.	
+		if(!IfPostTrim)
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF))
+			{
+				//flashLed();
+			}
+		}
+		else
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTFH))
+			{
+				//flashLed();
+			}
+		}
+		
+		//SetPin_H(DATA_DIR_H, HIGH);
+		
+		
+		//Set Hard ware
+/*		ADMP521T_CLK_OE(HIGH);
+		ADMP521T_FUSE_OE(LOW);		//Close Fuse chip enable pin
+		SetPin_H(DIR_H, HIGH);
+		SetPin_H(DATA_DIR_H, HIGH);
+		SetPin_H(CLK_SEL_H, LOW);
+*/		//SetPin_H(MUX_SEL_H, HIGH);
+		//SetPin_H(SDP_LR0_H, HIGH);
+		//SetPin_H(SDP_LR1_H, HIGH);
+	}	
+	else if(pUsbHeader->downByteCount == 1)		//Fuse bits.
+	{
+		//i2c write noraml en to enter normal mode.
+		u32 fuseValue = pUsbHeader->paramArray[0];
+		//Set fuse clock frequence.
+		if(pUsbHeader->upByteCount)
+			FUSE_CLK_CNT = pUsbHeader->upByteCount;
+		
+		//make sure the chip work under fuse mode status.
+		Setting_Fuse();
+		//Set Trim_load and Trim_Sel true.
+		//temp[0] = 0xF2;
+		//temp[1] = Trim_load | Trim_Sel | Fuse_en;
+		//temp[1] = Fuse_en;
+		//if(LR_sel_last)			//record last LR_sel setting.
+		//	temp[1] |= LR_sel;
+		//if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF))
+		//{
+		//	//flashLed();
+		//}
+		//SetPin_H(DATA_DIR_H, HIGH);
+					
+		//ADMP521T_CLK_OE(HIGH);	
+		//Set LR high and enable fuse chip.
+		//SetLR(HIGH, 2,false);
+		//ADMP521T_FUSE_OE(LOW);	//Enable Fuse chip	
+				
+		FuseChip(fuseValue,  FUSE_CLK_CNT);
+		
+		//After fuse operation, disable fuse chip and set LR low.
+		//ADMP521T_FUSE_OE(LOW);	
+		//SetLR(LOW, 2,false);
+		//flashLed();
+	}
+	else																			//I2C writting under fuse mode.
+	{
+		
+		temp[0] = (u8)(pUsbHeader->paramArray[0]);
+		temp[1] = (u8)(pUsbHeader->paramArray[1]);
+		//if(LR_sel_last)			//record last LR_sel setting.
+		//	temp[1] |= LR_sel;
+		Setting_Test(HIGH);			//setting to i2c writting condition before i2c operation.	
+		if(!IfPostTrim)
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTF))
+			{
+				//flashLed();
+			}
+		}
+		else
+		{
+			if(!I2CWrite(ADMP521T_ChipAdd, temp, 1, PORTFH))
+			{
+				//flashLed();
+			}
+		}
+	}
+	
+	Setting_Fuse();
+}
+
+
+void Get_FW_Version(void)
+{
+	memset(sendBuf, 0, sizeof(sendBuf));
+	sendBuf[0] = FW_version;
+	usbSendBulkData( &sendBuf[0],
+		                 512,
+		                 false);
+}
+
+void TestFunc(SDP_USB_HEADER *pUsbHeader)
+{
+	
+}
+
+void InitADMP441(bool rw)
+{
+	//---Step1: Write regs of ADMP441_0(TWI0
+	InitADMP441_regs_twi(rw);
+
+	//===Step2: Write regs of ADMP441_1(pesudo i2c)
+	u8 writeNum = 4;
+	u8 chipAddr = 0x28;
+	u8 dataBuffer[2 * writeNum];
+	if(!rw)		//write
+	{
+		//1.write 0x41 to reg0xAA
+		dataBuffer[0] = 0xAA;
+		dataBuffer[1] = 0x41;
+		if(!I2CWrite(chipAddr, dataBuffer, 1, PORTG))
+			flashLed();
+		waitMilliSec(10);
+		//2.write the remainder 3 regs.	
+		dataBuffer[0] = 0xF5;
+		dataBuffer[1] = 0x10;
+		dataBuffer[2] = 0x0A;
+		dataBuffer[3] = 0x0A;
+		dataBuffer[4] = 0xF3;
+		dataBuffer[5] = 0x00;
+		dataBuffer[6] = 0x0C;
+		dataBuffer[7] = 0x01;		
+		if(!I2CWrite(chipAddr, dataBuffer, writeNum, PORTG))
+			flashLed();
+	}
+	else		//read
+	{
+		//1.write 0x41 to reg0xAA
+		dataBuffer[0] = 0xAA;
+		dataBuffer[1] = 0x41;
+		if(!I2CWrite(chipAddr, dataBuffer, 1, PORTG))
+			flashLed();
+		waitMilliSec(10);
+
+		//2.write the remainder 3 regs.
+		dataBuffer[0] = 0xF5;
+		dataBuffer[1] = 0x00;
+		dataBuffer[2] = 0x0A;
+		dataBuffer[3] = 0x00;
+		dataBuffer[4] = 0xF3;
+		dataBuffer[5] = 0x00;
+		dataBuffer[6] = 0x0C;
+		dataBuffer[7] = 0x00;		
+		if(!I2CRead(chipAddr, dataBuffer, writeNum, PORTG))
+			flashLed();
+	}
+}
+
+
+void OtherControl(SDP_USB_HEADER *pUsbHeader)
+{
+	switch(pUsbHeader->downByteCount)
+	{
+		case ADMP521_OTHER_CTRL_CLKSWTICH:		//clock swtich
+			if(pUsbHeader->upByteCount)			//if true, send clk
+				ADMP521T_CLK_OE(LOW);
+			else
+				ADMP521T_CLK_OE(HIGH);			//If false, close clk
+			break;
+			
+		case ADMP521_OTHER_CTRL_SetPostTrim:	//Set post trim mode
+			if(pUsbHeader->upByteCount)
+				IfPostTrim = true;
+			else
+				IfPostTrim = false;
+			break;
+			
+		case ADMP521_OTHER_CTRL_SelectSDPorAP:  //Select SDP or AP		
+			SetPin_H(MUX_SEL_H, (bool)(pUsbHeader->upByteCount));
+			break;
+		default:
+			break;
+	}
+	
+}
+
+void PrepareI2CWrite(void)
+{
+	ADMP521T_CLK_OE(LOW);
+	ADMP521T_FUSE_OE(HIGH);				//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);			//default setting is write.
+	SetPin_H(CLK_SEL_H, LOW);
+	SetPin_H(MUX_SEL_H, HIGH);
+}
+
+void Setting_Normal(bool SDPorAP)
+{	
+	SetPin_H(MUX_SEL_H, SDPorAP);
+	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(HIGH);	
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, LOW);	
+	SetPin_H(CLK_SEL_H, HIGH);	
+	SetPin_H(SDP_LR0_H, LOW);			//Set LR, The two part should be the opposite.
+	SetPin_G(SDP_LR1_G, HIGH);	
+}
+
+void Setting_Test(bool write)
+{
+	SetLR(LOW, 2,false);	
+	ADMP521T_CLK_OE(LOW);
+	ADMP521T_FUSE_OE(HIGH);				//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(CLK_SEL_H, LOW);
+	SetPin_H(DATA_DIR_H, write);		//default setting is write.	
+	SetPin_H(MUX_SEL_H, HIGH);	
+}
+
+void Setting_Fuse(void)
+{
+	SetLR(LOW, 2,false);
+	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(LOW);				//Close Fuse chip enable pin
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, HIGH);
+	SetPin_H(CLK_SEL_H, LOW);	
+	SetPin_H(MUX_SEL_H, HIGH);	
+}
+
+void Setting_NormalTest(bool SDPorAP)	//SDPorAP:true->SDP mode,false->AP mode.
+{
+	SetPin_H(MUX_SEL_H, SDPorAP);
+	ADMP521T_CLK_OE(HIGH);
+	ADMP521T_FUSE_OE(HIGH);	
+	SetPin_H(DIR_H, HIGH);
+	SetPin_H(DATA_DIR_H, LOW);	
+	SetPin_H(CLK_SEL_H, HIGH);	
+	SetPin_H(SDP_LR0_H, HIGH);
+	SetPin_G(SDP_LR1_G, HIGH);	
+}
+
+
+//---------------------------------------------------------------------------------------------
+void TempInit(void)
+{
+	ADMP521T_CLK_OE(LOW);
+	ADMP521T_FUSE_OE(HIGH);		
+	SetPin_H(DATA_DIR_H, LOW);
+}
+
+
+
+
+
+
+
+
+
